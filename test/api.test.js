@@ -291,3 +291,87 @@ test('stream transport failures retain safe codes while HTTP classification stay
     });
   }
 });
+
+test('media failures identify metadata versus download without exposing request details', async () => {
+  const fileId = 'private-source-file-id';
+  const privatePath = 'voice/private-filename.ogg';
+  for (const [stage, status, operation] of [
+    ['metadata', 400, 'get_file_metadata'], ['download', 404, 'download_file'],
+  ]) {
+    let requests = 0;
+    const bot = api('bale', async url => {
+      requests++;
+      if (stage === 'download' && url.endsWith('/getFile')) return ok({ file_path: privatePath });
+      return Response.json({ ok: false, description: `unsafe ${TOKEN} ${fileId} ${privatePath}` }, { status });
+    });
+    await assert.rejects(bot.getFileBuffer(fileId), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.category, 'permanent');
+      assert.equal(error.permanent, true);
+      assert.equal(error.code, status);
+      assert.equal(error.operation, operation);
+      assert.equal(error.reason, undefined);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`,
+        /private_test_token|private-source-file-id|private-filename|tapi\.bale|unsafe|https:/);
+      return true;
+    });
+    assert.equal(requests, stage === 'download' ? 2 : 1);
+  }
+});
+
+test('local file validation reports only fixed reasons and retains existing rejection rules', async () => {
+  for (const [file_path, reason] of [
+    [undefined, 'missing_file_path'], [12, 'invalid_file_path_type'],
+    ['x'.repeat(2049), 'file_path_too_long'],
+    [`https://private.invalid/${TOKEN}?private-query`, 'absolute_file_path'],
+    ['voice/private%20filename.ogg', 'encoded_file_path'],
+    ['/private-filename', 'absolute_file_path'], ['a//private-filename', 'empty_file_path_segment'],
+    ['a/../private-filename', 'file_path_traversal'], ['a/\ud800', 'invalid_file_path_encoding'],
+  ]) {
+    let requests = 0;
+    const bot = api('bale', async () => { requests++; return ok({ file_path }); });
+    await assert.rejects(bot.getFileBuffer('private-source-file-id'), error => {
+      assert.equal(error.category, 'permanent');
+      assert.equal(error.permanent, true);
+      assert.equal(error.code, null);
+      assert.equal(error.operation, 'validate_file_path');
+      assert.equal(error.reason, reason);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`,
+        /private_test_token|private-source-file-id|private-filename|private-query|private\.invalid|https:/);
+      return true;
+    });
+    assert.equal(requests, 1, 'rejected file paths must not be downloaded');
+  }
+  const invalidId = api('bale', async () => assert.fail('invalid file IDs are rejected locally'));
+  await assert.rejects(invalidId.getFileBuffer(''), error => error.operation === 'get_file_metadata'
+    && error.reason === 'invalid_file_id' && error.code === null);
+});
+
+test('media transport and send diagnostics preserve allowlisted network codes', async () => {
+  const fail = () => { throw Object.assign(new Error(`https://private.invalid/${TOKEN}`), { code: 'ECONNRESET' }); };
+  const download = api('bale', async url => url.endsWith('/getFile')
+    ? ok({ file_path: 'voice/private-filename.ogg' }) : fail());
+  const send = api('telegram', fail);
+  for (const [promise, operation] of [
+    [download.getFileBuffer('private-source-file-id'), 'download_file'],
+    [send.send({ method: 'sendMessage', params: { text: 'private-message' } }, { chatId: 1 }), 'send_message'],
+  ]) {
+    await assert.rejects(promise, error => {
+      assert.equal(error.category, 'network');
+      assert.equal(error.code, null);
+      assert.equal(error.networkCode, 'ECONNRESET');
+      assert.equal(error.operation, operation);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`,
+        /private_test_token|private-source-file-id|private-filename|private-message|private\.invalid/);
+      return true;
+    });
+  }
+});
+
+test('diagnostic operation and reason fields reject arbitrary strings', () => {
+  const secret = `https://private.invalid/${TOKEN}?private-query`;
+  const error = new ApiError('permanent', { operation: secret, reason: secret });
+  assert.equal(Object.hasOwn(error, 'operation'), false);
+  assert.equal(Object.hasOwn(error, 'reason'), false);
+  assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private_test_token|private\.invalid|private-query/);
+});

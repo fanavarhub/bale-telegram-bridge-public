@@ -320,6 +320,25 @@ test('an oversized source download is reported locally and is never uploaded or 
   assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM attachments').get().n, 0);
 });
 
+test('source media failures expose only operation and HTTP diagnostics before any destination upload', async t => {
+  const lines = [];
+  t.mock.method(console, 'log', line => lines.push(JSON.parse(line)));
+  const f = fixture(t, { bale: [update('bale', 80, {
+    voice: { file_id: 'private-file-id-not-for-logs', file_name: 'private-voice.ogg' },
+  })] });
+  f.apis.bale.fileImpl = () => { throw new ApiError('permanent', { code: 404, operation: 'download_file' }); };
+  f.start();
+  await until(() => f.store.stats('bale').notified === 1, 'source media failure notice');
+  await f.stop();
+  assert.equal(f.apis.telegram.attempts.length, 0);
+  const failed = lines.find(line => line.event === 'message_failed');
+  assert.equal(failed.platform, 'bale');
+  assert.equal(failed.operation, 'download_file');
+  assert.equal(failed.httpCode, 404);
+  assert.equal(failed.code, 'permanent');
+  assert.doesNotMatch(JSON.stringify(lines), /private-file-id-not-for-logs|private-voice|https:/);
+});
+
 test('a bot-wide 429 retry floor also delays a later local status notice to that same bot', async t => {
   const f = fixture(t, { bale: [update('bale', 10, { text: 'relay waiting for rate-limit recovery' })] });
   const retryAfterMs = 1200;

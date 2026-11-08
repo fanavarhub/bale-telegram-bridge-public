@@ -18,6 +18,15 @@ const SEND_METHODS = new Set([
   'sendMessage', ...Object.keys(FILE_FIELDS), 'sendLocation', 'sendVenue', 'sendContact',
 ]);
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+const ERROR_OPERATIONS = new Set([
+  'get_file_metadata', 'validate_file_path', 'download_file', 'send_message',
+]);
+const ERROR_REASONS = new Set([
+  'invalid_file_id', 'missing_file_path', 'invalid_file_path_type', 'file_path_too_long',
+  'unsafe_file_path_characters', 'absolute_file_path', 'empty_file_path_segment',
+  'file_path_traversal', 'invalid_file_path_encoding',
+  'encoded_file_path',
+]);
 const NETWORK_ERROR_CODES = new Set([
   'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED',
   'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'EPIPE', 'EADDRNOTAVAIL',
@@ -65,16 +74,27 @@ export function networkErrorCode(error) {
 
 /** Deliberately excludes remote descriptions, URLs, tokens and raw causes. */
 export class ApiError extends Error {
-  constructor(category, { code = null, retryAfterMs = 0, networkCode } = {}) {
+  constructor(category, { code = null, retryAfterMs = 0, networkCode, operation, reason } = {}) {
     super(MESSAGES[category] ?? MESSAGES.transient);
     this.name = 'ApiError';
     this.category = Object.hasOwn(MESSAGES, category) ? category : 'transient';
     this.code = Number.isSafeInteger(code) ? code : null;
     if (this.category === 'network' && NETWORK_ERROR_CODES.has(networkCode)) this.networkCode = networkCode;
+    if (ERROR_OPERATIONS.has(operation)) this.operation = operation;
+    if (ERROR_REASONS.has(reason)) this.reason = reason;
     this.permanent = ['auth', 'conflict', 'permanent', 'file_too_large'].includes(this.category);
     this.retryAfterMs = Number.isFinite(retryAfterMs) && retryAfterMs >= 0
       ? Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(retryAfterMs)) : 0;
   }
+}
+
+function operationError(error, operation) {
+  if (error instanceof ApiError && ERROR_OPERATIONS.has(operation)) error.operation = operation;
+  return error;
+}
+
+function invalidFilePath(reason) {
+  return new ApiError('permanent', { operation: 'validate_file_path', reason });
 }
 
 function errorFor(code, retryAfterMs = 0) {
@@ -101,14 +121,15 @@ function safeFilename(value, fallback = 'media.bin') {
 }
 
 function filePathSegments(value) {
-  if (typeof value !== 'string' || !value || value.length > 2048
-      || /[\\%\s\u0000-\u001f\u007f?#:]/u.test(value) || value.startsWith('/')) {
-    throw new ApiError('permanent');
-  }
+  if (value === undefined || value === null || value === '') throw invalidFilePath('missing_file_path');
+  if (typeof value !== 'string') throw invalidFilePath('invalid_file_path_type');
+  if (value.length > 2048) throw invalidFilePath('file_path_too_long');
+  if (value.startsWith('/') || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) throw invalidFilePath('absolute_file_path');
+  if (value.includes('%')) throw invalidFilePath('encoded_file_path');
+  if (/[\\%\s\u0000-\u001f\u007f?#:]/u.test(value)) throw invalidFilePath('unsafe_file_path_characters');
   const segments = value.split('/');
-  if (segments.some(part => !part || part === '.' || part === '..')) {
-    throw new ApiError('permanent');
-  }
+  if (segments.some(part => !part)) throw invalidFilePath('empty_file_path_segment');
+  if (segments.some(part => part === '.' || part === '..')) throw invalidFilePath('file_path_traversal');
   return segments;
 }
 
@@ -258,26 +279,39 @@ export class BotApi {
 
   async getFileBuffer(fileId, { signal } = {}) {
     if (typeof fileId !== 'string' || !fileId || fileId.length > 4096) {
-      throw new ApiError('permanent');
+      throw new ApiError('permanent', { operation: 'get_file_metadata', reason: 'invalid_file_id' });
     }
     // Refresh getFile for every attempt; cached download links may have expired.
-    const info = await this.call('getFile', { file_id: fileId }, { signal });
-    if (Number(info?.file_size) > this.maxFileBytes) throw new ApiError('file_too_large');
+    let info;
+    try { info = await this.call('getFile', { file_id: fileId }, { signal }); }
+    catch (error) { throw operationError(error, 'get_file_metadata'); }
+    if (Number(info?.file_size) > this.maxFileBytes) {
+      throw new ApiError('file_too_large', { operation: 'get_file_metadata' });
+    }
     const segments = filePathSegments(info?.file_path);
     let path;
     try { path = segments.map(encodeURIComponent).join('/'); }
-    catch { throw new ApiError('permanent'); }
+    catch { throw invalidFilePath('invalid_file_path_encoding'); }
     const url = `${this.#origin}/file/bot${this.#token}/${path}`;
-    const response = await this.#request(url, { method: 'GET' }, this.#downloadTimeoutMs, signal);
-    if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* No remote error is exposed. */ }
-      throw errorFor(response.status, retryDelay(response));
+    try {
+      const response = await this.#request(url, { method: 'GET' }, this.#downloadTimeoutMs, signal);
+      if (!response.ok) {
+        try { await response.body?.cancel(); } catch { /* No remote error is exposed. */ }
+        throw errorFor(response.status, retryDelay(response));
+      }
+      const bytes = await readBounded(response, this.maxFileBytes, 'file_too_large');
+      return { bytes, filename: safeFilename(segments.at(-1)) };
+    } catch (error) {
+      throw operationError(error, 'download_file');
     }
-    const bytes = await readBounded(response, this.maxFileBytes, 'file_too_large');
-    return { bytes, filename: safeFilename(segments.at(-1)) };
   }
 
-  async send(step, { chatId, replyToId, bytes, filename, signal } = {}) {
+  async send(step, options = {}) {
+    try { return await this.#send(step, options); }
+    catch (error) { throw operationError(error, 'send_message'); }
+  }
+
+  async #send(step, { chatId, replyToId, bytes, filename, signal } = {}) {
     if (!step || !SEND_METHODS.has(step.method)
         || !positiveId(chatId)
         || replyToId !== undefined && !positiveId(replyToId)) {

@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { PLATFORMS } from './config.js';
 import { authorizedMessage, planMessage } from './plan.js';
+import { ApiError } from './api.js';
 
 export const other = platform => platform === 'bale' ? 'telegram' : 'bale';
 export function retryDelay(attempt = 0, minimum = 0, random = Math.random) {
@@ -12,7 +13,7 @@ export function log(event, fields = {}) {
   // Deliberately whitelist metadata: never log API URLs, message bodies, tokens,
   // downloaded filenames, raw exceptions or API error descriptions.
   const safe = { time: new Date().toISOString(), event };
-  for (const key of ['platform', 'job', 'code', 'networkCode', 'count', 'retryMs']) if (fields[key] !== undefined) safe[key] = fields[key];
+  for (const key of ['platform', 'job', 'code', 'networkCode', 'operation', 'reason', 'httpCode', 'count', 'retryMs']) if (fields[key] !== undefined) safe[key] = fields[key];
   console.log(JSON.stringify(safe));
 }
 const pause = async (ms, signal) => {
@@ -48,6 +49,16 @@ function fatalApi(error) { return ['auth', 'conflict'].includes(error?.category)
 function safeCode(error) {
   const code = error?.category || error?.code;
   return typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? code : 'internal_error';
+}
+function errorDiagnostics(error) {
+  const fields = { code: safeCode(error) };
+  if (error instanceof ApiError) {
+    if (Number.isSafeInteger(error.code) && error.code >= 100 && error.code <= 599) fields.httpCode = error.code;
+    if (error.networkCode) fields.networkCode = error.networkCode;
+    if (error.operation) fields.operation = error.operation;
+    if (error.reason) fields.reason = error.reason;
+  }
+  return fields;
 }
 
 export async function runBridge({ config, store, apis, signal, onFatal = () => {} }) {
@@ -160,12 +171,12 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
         if (fatalApi(error)) throw error;
         if (error.permanent) {
           store.failWithNotice(job, safeCode(error));
-          log('message_failed', { platform, job: job.id, code: safeCode(error) });
+          log('message_failed', { platform, job: job.id, ...errorDiagnostics(error) });
         } else if (['network', 'transient', 'rate_limit'].includes(safeCode(error))) {
           const ms = retryDelay(job.stage_attempts, error.retryAfterMs);
           rateGate(platform, error, ms);
           store.defer(job.id, 'stage', safeCode(error), Date.now() + ms);
-          log('download_retry', { platform, job: job.id, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
+          log('download_retry', { platform, job: job.id, ...errorDiagnostics(error), retryMs: ms });
         } else throw error;
       }
     }
@@ -210,13 +221,13 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
             store.replaceStep(job, { ...step, method: 'sendDocument', file: { ...step.file, field: 'document' }, params: { caption: caption ? `${caption}\n(فایل اصلی)` : 'فایل اصلی؛ نمایش در قالب اولیه ممکن نشد.' } });
           } else {
             store.failWithNotice(job, safeCode(error));
-            log('message_failed', { platform: target, job: job.id, code: safeCode(error) });
+            log('message_failed', { platform: target, job: job.id, ...errorDiagnostics(error) });
           }
         } else if (['network', 'transient', 'rate_limit'].includes(safeCode(error))) {
           const ms = retryDelay(job.send_attempts, error.retryAfterMs);
           rateGate(target, error, ms);
           store.defer(job.id, 'send', safeCode(error), Date.now() + ms);
-          log('send_retry', { platform: target, job: job.id, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
+          log('send_retry', { platform: target, job: job.id, ...errorDiagnostics(error), retryMs: ms });
         } else throw error;
       }
     }
