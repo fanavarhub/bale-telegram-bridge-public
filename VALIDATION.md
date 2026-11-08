@@ -1,6 +1,6 @@
 # Validation
 
-Date: 2026-11-08. The public configuration version passes **54 mocked tests, 0 failed**, including 11 runtime integration tests, on Node.js v26.13.0. Required identity configuration, closed authorization defaults, queue participant binding and pinned bot identity are covered in this version.
+Date: 2026-11-08. The public configuration version passes **61 mocked tests, 0 failed**, including 11 runtime integration tests and 7 doctor preflight tests, on Node.js v26.13.0. Required identity configuration, closed authorization defaults, queue participant binding and pinned bot identity are covered in this version.
 
 The suite uses synthetic user IDs, synthetic bot names, fake API responses and isolated temporary databases. It must not use production credentials or send bot messages.
 
@@ -13,6 +13,7 @@ Coverage includes:
 - Restart recovery between delivery steps; encrypted queued text/media, wrong-key rejection, ciphertext tamper rejection, ciphertext backup and restoration.
 - Independent directions during outages, source commands during a destination outage, media staging while the destination is down, source failure notices without recursion and retained messages after recipient 403.
 - Exponential retry and shared per-bot retry-after gating, including a local status response that cannot bypass a 429 cooldown.
+- Read-only doctor preflight rejects webhook conflicts before PM2 startup, allows explicitly authorized startup removal, and never logs the configured webhook URL or deletes it itself.
 
 Public DNS/TLS reachability alone does not validate credentials, getUpdates, file downloads, uploads, codecs, bot ownership, user IDs or future connectivity during network restrictions.
 

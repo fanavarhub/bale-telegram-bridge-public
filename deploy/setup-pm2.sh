@@ -90,7 +90,10 @@ fi
 
 # This diagnostic only calls getMe/getWebhookInfo; it does not poll messages,
 # acknowledge updates, change webhooks or conflict with a running bridge.
-npm run doctor -- --samples=1
+if ! npm run doctor -- --samples=1; then
+  printf '%s\n' 'Preflight failed; PM2 was not started or restarted. Resolve the diagnostic above. For an existing webhook, set REMOVE_EXISTING_WEBHOOK=true in local .env to allow removal at bridge startup, or remove the webhook yourself.' >&2
+  exit 1
+fi
 
 pm2 startOrRestart ecosystem.config.cjs --update-env
 pm2 save
