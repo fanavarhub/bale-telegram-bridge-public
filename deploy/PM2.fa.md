@@ -63,6 +63,21 @@ node --dns-result-order=ipv4first --env-file=.env src/doctor.js --samples=1
 
 هر پاسخ واقعی HTTP در تست curl، دسترسی HTTPS همان مسیر را نشان می‌دهد؛ `HTTP=000` همراه با خطای curl نیازمند بررسی است. گزینهٔ Node در تست آخر فقط IPv4 را در ترتیب lookup ترجیح می‌دهد؛ نتیجهٔ مقایسه باید پیش از تغییر دائمی تنظیمات بررسی شود. ([راهنمای رسمی Node.js 24](https://nodejs.org/download/release/v24.22.1/docs/api/cli.html))
 
+اگر curl روی IPv4 موفق است اما Node هنوز timeout می‌دهد، ترکیب زیر را امتحان کنید؛ اولویت IPv4 به‌تنهایی انتخاب خودکار خانوادهٔ آدرس را غیرفعال نمی‌کند:
+
+```bash
+node --no-network-family-autoselection --dns-result-order=ipv4first --env-file=.env src/doctor.js --samples=1
+```
+
+اگر این آزمون برای هر دو سرویس موفق بود، اجرای اختصاصی PM2 با همان دو گزینه موجود است:
+
+```bash
+pm2 startOrRestart ecosystem.ipv4.config.cjs --only bale-telegram-bridge --update-env
+pm2 save
+```
+
+در restartهای بعدی هم همین فایل را استفاده کنید. این فایل تنظیمات پایه را نگه می‌دارد، `.env` یا `NODE_OPTIONS` را بازنویسی نمی‌کند و فقط گزینه‌های همین فرایند را تغییر می‌دهد. با وجود رکورد A، IPv4 در lookup انتخاب می‌شود؛ این روش خانوادهٔ آدرس را به‌صورت سخت به ۴ محدود نمی‌کند و برای میزبان دارای تنها AAAA هنوز IPv6 ممکن است. اگر آزمون همچنان شکست خورد، موفقیت curl به‌تنهایی علت timeout در Node را تعیین نمی‌کند. ([مستندات دقیق Node.js 24.22.2](https://github.com/nodejs/node/blob/v24.22.2/doc/api/cli.md#--no-network-family-autoselection))
+
 شناسهٔ چت بله به‌صورت پیش‌فرض از `BALE_ALLOWED_USER_ID` گرفته می‌شود. برای تأیید چت خصوصی، فقط وقتی پل متوقف است، از کاربر مجاز Start تازه بفرستید و اجرا کنید:
 
 ```bash
