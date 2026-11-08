@@ -18,6 +18,19 @@ const SEND_METHODS = new Set([
   'sendMessage', ...Object.keys(FILE_FIELDS), 'sendLocation', 'sendVenue', 'sendContact',
 ]);
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+const NETWORK_ERROR_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED',
+  'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'EPIPE', 'EADDRNOTAVAIL',
+  'ABORT_ERR', 'ERR_SOCKET_CLOSED', 'ERR_SOCKET_CONNECTION_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT', 'UND_ERR_ABORTED',
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED',
+  'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE',
+  'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+]);
 const MESSAGES = Object.freeze({
   network: 'The service connection failed or timed out.',
   rate_limit: 'The service requested a later retry.',
@@ -28,13 +41,36 @@ const MESSAGES = Object.freeze({
   file_too_large: 'The file exceeds the configured transfer size limit.',
 });
 
+/** Return only a known transport code; never stringify exceptions or causes. */
+export function networkErrorCode(error) {
+  const pending = [error];
+  const seen = new Set();
+  for (let index = 0; index < pending.length && index < 32; index++) {
+    const current = pending[index];
+    if (!current || (typeof current !== 'object' && typeof current !== 'function') || seen.has(current)) continue;
+    seen.add(current);
+    try {
+      const code = current.code;
+      if (NETWORK_ERROR_CODES.has(code)) return code;
+      const cause = current.cause;
+      if (cause && pending.length < 32) pending.push(cause);
+      const errors = current.errors;
+      if (Array.isArray(errors)) {
+        for (let i = 0; i < errors.length && i < 8 && pending.length < 32; i++) pending.push(errors[i]);
+      }
+    } catch { /* Untrusted error accessors must not escape the safe wrapper. */ }
+  }
+  return undefined;
+}
+
 /** Deliberately excludes remote descriptions, URLs, tokens and raw causes. */
 export class ApiError extends Error {
-  constructor(category, { code = null, retryAfterMs = 0 } = {}) {
+  constructor(category, { code = null, retryAfterMs = 0, networkCode } = {}) {
     super(MESSAGES[category] ?? MESSAGES.transient);
     this.name = 'ApiError';
     this.category = Object.hasOwn(MESSAGES, category) ? category : 'transient';
     this.code = Number.isSafeInteger(code) ? code : null;
+    if (this.category === 'network' && NETWORK_ERROR_CODES.has(networkCode)) this.networkCode = networkCode;
     this.permanent = ['auth', 'conflict', 'permanent', 'file_too_large'].includes(this.category);
     this.retryAfterMs = Number.isFinite(retryAfterMs) && retryAfterMs >= 0
       ? Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(retryAfterMs)) : 0;
@@ -111,7 +147,7 @@ async function readBounded(response, limit, category) {
     return Buffer.concat(chunks, total);
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    throw new ApiError('network');
+    throw new ApiError('network', { networkCode: networkErrorCode(error) });
   } finally {
     reader.releaseLock();
   }
@@ -172,7 +208,7 @@ export class BotApi {
       return response;
     } catch (error) {
       if (error instanceof ApiError) throw error;
-      throw new ApiError('network');
+      throw new ApiError('network', { networkCode: networkErrorCode(error) });
     }
   }
 

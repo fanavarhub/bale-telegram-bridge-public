@@ -12,7 +12,7 @@ export function log(event, fields = {}) {
   // Deliberately whitelist metadata: never log API URLs, message bodies, tokens,
   // downloaded filenames, raw exceptions or API error descriptions.
   const safe = { time: new Date().toISOString(), event };
-  for (const key of ['platform', 'job', 'code', 'count', 'retryMs']) if (fields[key] !== undefined) safe[key] = fields[key];
+  for (const key of ['platform', 'job', 'code', 'networkCode', 'count', 'retryMs']) if (fields[key] !== undefined) safe[key] = fields[key];
   console.log(JSON.stringify(safe));
 }
 const pause = async (ms, signal) => {
@@ -100,7 +100,7 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
         if (error instanceof FatalError || fatalApi(error) || error.permanent) throw error;
         const ms = retryDelay(attempt++, error.retryAfterMs);
         rateGate(platform, error, ms);
-        log('bootstrap_retry', { platform, code: safeCode(error), retryMs: ms });
+        log('bootstrap_retry', { platform, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
         await pause(ms, shutdown);
       }
     }
@@ -125,7 +125,7 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
         if (!['network', 'transient', 'rate_limit', 'queue_capacity_reached'].includes(safeCode(error))) throw error;
         const ms = retryDelay(attempt++, error.retryAfterMs);
         rateGate(platform, error, ms);
-        log('poll_retry', { platform, code: safeCode(error), retryMs: ms });
+        log('poll_retry', { platform, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
         await pause(ms, shutdown);
       }
     }
@@ -165,7 +165,7 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
           const ms = retryDelay(job.stage_attempts, error.retryAfterMs);
           rateGate(platform, error, ms);
           store.defer(job.id, 'stage', safeCode(error), Date.now() + ms);
-          log('download_retry', { platform, job: job.id, code: safeCode(error), retryMs: ms });
+          log('download_retry', { platform, job: job.id, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
         } else throw error;
       }
     }
@@ -216,7 +216,7 @@ export async function runBridge({ config, store, apis, signal, onFatal = () => {
           const ms = retryDelay(job.send_attempts, error.retryAfterMs);
           rateGate(target, error, ms);
           store.defer(job.id, 'send', safeCode(error), Date.now() + ms);
-          log('send_retry', { platform: target, job: job.id, code: safeCode(error), retryMs: ms });
+          log('send_retry', { platform: target, job: job.id, code: safeCode(error), networkCode: error.networkCode, retryMs: ms });
         } else throw error;
       }
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BotApi, ApiError } from '../src/api.js';
+import { BotApi, ApiError, networkErrorCode } from '../src/api.js';
 
 const TOKEN = '123:private_test_token';
 const ok = (result, init) => Response.json({ ok: true, result }, init);
@@ -225,4 +225,69 @@ test('malformed responses and stream failures expose only generic safe errors', 
   const unsafeId = api('telegram', async () => assert.fail('unsafe IDs must be rejected locally'));
   await assert.rejects(unsafeId.send({ method: 'sendMessage', params: { text: 'x' } },
     { chatId: 1, replyToId: '9007199254740993' }), error => error.category === 'permanent');
+});
+
+test('network errors retain only allowlisted codes from native causes and aggregates', async () => {
+  const privateText = `https://private.invalid/bot${TOKEN}/getMe`;
+  const native = code => Object.assign(new Error(privateText), { code });
+  for (const [cause, expected] of [
+    [native('ENOTFOUND'), 'ENOTFOUND'],
+    [new TypeError(privateText, { cause: native('UND_ERR_CONNECT_TIMEOUT') }), 'UND_ERR_CONNECT_TIMEOUT'],
+    [new AggregateError([native(privateText), native('ENETUNREACH')], privateText), 'ENETUNREACH'],
+    [new TypeError(privateText, { cause: new AggregateError([
+      native(privateText), new Error(privateText, { cause: native('ECONNREFUSED') }),
+    ], privateText) }), 'ECONNREFUSED'],
+  ]) {
+    const bot = api('telegram', async () => { throw cause; });
+    await assert.rejects(bot.call('getMe'), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.category, 'network');
+      assert.equal(error.code, null, 'transport codes must not replace numeric HTTP codes');
+      assert.equal(error.networkCode, expected);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private_test_token|private\.invalid/);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      return true;
+    });
+  }
+});
+
+test('unknown network codes, cycles and untrusted accessors remain private and bounded', async () => {
+  const privateText = `https://private.invalid/${TOKEN}`;
+  const cause = Object.assign(new Error(privateText), { code: privateText });
+  cause.cause = cause;
+  assert.equal(networkErrorCode(cause), undefined);
+  assert.equal(networkErrorCode({ get code() { throw cause; } }), undefined);
+  let reads = 0;
+  assert.equal(networkErrorCode({ get code() { return reads++ ? privateText : 'ECONNRESET'; } }), 'ECONNRESET');
+  assert.equal(reads, 1, 'a code accessor cannot change after the whitelist check');
+  const bot = api('telegram', async () => { throw new TypeError(privateText, { cause }); });
+  await assert.rejects(bot.call('getMe'), error => {
+    assert.equal(error.category, 'network');
+    assert.equal(Object.hasOwn(error, 'networkCode'), false);
+    assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private_test_token|private\.invalid/);
+    return true;
+  });
+  assert.equal(new ApiError('network', { networkCode: privateText }).networkCode, undefined);
+  const httpError = new ApiError('auth', { code: 401, networkCode: 'ECONNRESET' });
+  assert.equal(httpError.code, 401);
+  assert.equal(httpError.networkCode, undefined);
+});
+
+test('stream transport failures retain safe codes while HTTP classification stays numeric', async () => {
+  for (const status of [200, 503]) {
+    const bot = api('telegram', async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.error(new Error(`read failed ${TOKEN}`, {
+          cause: Object.assign(new Error(`private ${TOKEN}`), { code: 'UND_ERR_SOCKET' }),
+        }));
+      },
+    }), { status }));
+    await assert.rejects(bot.call('getMe'), error => {
+      assert.equal(error.category, status === 200 ? 'network' : 'transient');
+      assert.equal(error.code, status === 200 ? null : 503);
+      assert.equal(error.networkCode, status === 200 ? 'UND_ERR_SOCKET' : undefined);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private_test_token/);
+      return true;
+    });
+  }
 });

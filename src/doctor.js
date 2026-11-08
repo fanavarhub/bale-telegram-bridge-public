@@ -3,7 +3,7 @@ import { connect } from 'node:tls';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { BotApi } from './api.js';
+import { ApiError, BotApi, networkErrorCode } from './api.js';
 import { loadConfig, PLATFORMS } from './config.js';
 
 function option(args, name, fallback, min, max) {
@@ -17,21 +17,25 @@ function timedTls(host) {
     const start = performance.now();
     const socket = connect({ host, port: 443, servername: host, rejectUnauthorized: true, timeout: 10000 });
     socket.once('secureConnect', () => { const ms = Math.round(performance.now() - start); socket.destroy(); resolve(ms); });
-    socket.once('timeout', () => { socket.destroy(); reject(new Error('tls_timeout')); });
-    socket.once('error', () => { socket.destroy(); reject(new Error('tls_failed')); });
+    socket.once('timeout', () => { socket.destroy(); reject(Object.assign(new Error('tls_timeout'), { code: 'ETIMEDOUT' })); });
+    socket.once('error', error => { socket.destroy(); reject(error); });
   });
 }
 async function measurePublic(platform) {
   const host = platform === 'bale' ? 'tapi.bale.ai' : 'api.telegram.org';
   const result = { platform };
+  let stage = 'dns';
   try {
     let start = performance.now();
     await Promise.race([
       lookup(host),
-      delay(10000, undefined, { ref: false }).then(() => { throw new Error('dns_timeout'); }),
+      delay(10000, undefined, { ref: false }).then(() => { throw Object.assign(new Error('dns_timeout'), { code: 'ETIMEDOUT' }); }),
     ]);
     result.dnsMs = Math.round(performance.now() - start);
+    // This connection performs a fresh lookup before TCP and TLS negotiation.
+    stage = 'tcp_tls';
     result.tlsMs = await timedTls(host);
+    stage = 'http';
     start = performance.now();
     const response = await fetch(`https://${host}/`, { redirect: 'manual', signal: AbortSignal.timeout(15000) });
     result.httpMs = Math.round(performance.now() - start);
@@ -39,9 +43,12 @@ async function measurePublic(platform) {
     await response.body?.cancel();
     // A 404 at the bare host still proves HTTPS reachability, not API health.
     result.publicReachable = response.status >= 100 && response.status < 600;
-  } catch {
+  } catch (error) {
     result.publicReachable = false;
     result.error = 'dns_tls_or_http_failed';
+    result.stage = stage;
+    const code = networkErrorCode(error);
+    if (code) result.errorCode = code;
   }
   return result;
 }
@@ -118,6 +125,10 @@ export async function runDoctor(args = process.argv.slice(2), {
             }
           } catch (error) {
             result.apiOrMediaError = ['network', 'rate_limit', 'auth', 'conflict', 'permanent', 'transient', 'file_too_large'].includes(error.category) ? error.category : 'validation_failed';
+            if (error instanceof ApiError && error.category === 'network') {
+              const code = networkErrorCode({ code: error.networkCode });
+              if (code) result.apiNetworkCode = code;
+            }
             failed = true;
           }
         }

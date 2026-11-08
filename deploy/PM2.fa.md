@@ -50,6 +50,19 @@ BRIDGE_SETUP
 
 اگر پیام `existing_webhook_set_remove_flag_locally` دیده می‌شود، بات هنوز به یک گیرندهٔ webhook وصل است. برای مهاجرت به این پل، سرویس قبلیِ همین بات را متوقف کنید، برنامهٔ PM2 را stop کنید، در `.env` مقدار `REMOVE_EXISTING_WEBHOOK=true` بگذارید و با `pm2 startOrRestart ecosystem.config.cjs --update-env` اجرا کنید. برنامه هنگام شروع webhook را برمی‌دارد و برای حذف پیام‌های معوق درخواست نمی‌دهد. `doctor` خودش webhook را حذف نمی‌کند؛ با پیش‌فرض `false` این وضعیت را مانع polling می‌داند و قبل از اجرای PM2 خطا می‌دهد. پس از مهاجرت موفق می‌توانید پرچم را دوباره `false` کنید تا ایجاد webhook دیگری آشکار شود.
 
+اگر `bootstrap_retry` با کد `network` تکرار می‌شود، خروجی تازهٔ `doctor` را بررسی کنید. `stage` مرحلهٔ شکست (`dns`، `tcp_tls` یا `http`) را نشان می‌دهد؛ مرحلهٔ `tcp_tls` شامل lookup تازه، TCP و TLS است. `errorCode` و `apiNetworkCode` فقط کدهای شناخته‌شدهٔ خطا را می‌نویسند. پیام خام خطا و URL حاوی توکن چاپ نمی‌شود. وصل‌بودن مرورگر یا ابزار دیگر، موفقیت اتصال همین فرایند Node را ثابت نمی‌کند.
+
+برای مقایسهٔ اتصال مستقیم IPv4 و IPv6 و اولویت DNS در Node، بدون تغییر تنظیمات شبکه و بدون توقف پل:
+
+```bash
+curl -4 --noproxy '*' -sS -o /dev/null --connect-timeout 8 --max-time 15 -w 'IPv4 HTTP=%{http_code}\n' https://api.telegram.org/
+curl -6 --noproxy '*' -sS -o /dev/null --connect-timeout 8 --max-time 15 -w 'IPv6 HTTP=%{http_code}\n' https://api.telegram.org/
+node --env-file=.env src/doctor.js --samples=1
+node --dns-result-order=ipv4first --env-file=.env src/doctor.js --samples=1
+```
+
+هر پاسخ واقعی HTTP در تست curl، دسترسی HTTPS همان مسیر را نشان می‌دهد؛ `HTTP=000` همراه با خطای curl نیازمند بررسی است. گزینهٔ Node در تست آخر فقط IPv4 را در ترتیب lookup ترجیح می‌دهد؛ نتیجهٔ مقایسه باید پیش از تغییر دائمی تنظیمات بررسی شود. ([راهنمای رسمی Node.js 24](https://nodejs.org/download/release/v24.22.1/docs/api/cli.html))
+
 شناسهٔ چت بله به‌صورت پیش‌فرض از `BALE_ALLOWED_USER_ID` گرفته می‌شود. برای تأیید چت خصوصی، فقط وقتی پل متوقف است، از کاربر مجاز Start تازه بفرستید و اجرا کنید:
 
 ```bash
