@@ -1,0 +1,23 @@
+[Unit]
+Description=Private Bale Telegram bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+Group=bridge
+WorkingDirectory=/opt/bale-telegram-bridge
+ExecStart=/usr/bin/node --env-file=/opt/bale-telegram-bridge/.env /opt/bale-telegram-bridge/src/main.js
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bale-telegram-bridge/data
+
+[Install]
+WantedBy=multi-user.target
